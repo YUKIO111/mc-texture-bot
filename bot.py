@@ -22,15 +22,7 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_FILE = DATA_DIR / "packs.json"
-# Loading sticker file_id (ixtiyoriy). Bo'sh bo'lsa "⏳ Yuklanmoqda..." matni chiqadi.
-# ---------- Sticker file_id olish (vaqtincha: hammaga) ----------
-@dp.message(F.sticker)
-async def on_sticker(message: Message):
-    await message.answer(
-        "🆔 Sticker file_id:\n<code>"
-        + message.sticker.file_id
-        + "</code>"
-    )
+LOADING_STICKER_ID = os.getenv("LOADING_STICKER_ID", "")
 
 # ---------- Bo'limlar (emoji + nom) ----------
 CATEGORIES = [
@@ -46,9 +38,9 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-pending = {}        # admin .zip yuborganda bo'lim tanlashini kutish
-user_category = {}  # user_id -> hozir ochilgan bo'lim
-last_menu = {}      # user_id -> oxirgi menyu xabarining id'si
+pending = {}
+user_category = {}
+last_menu = {}
 
 # ---------- Saqlash ----------
 def load_packs():
@@ -70,12 +62,11 @@ async def safe_delete_message(chat_id: int, message_id: int):
         pass
 
 async def show_menu(message: Message, text: str, kb):
-    """Botning eski menyusini o'chirib, yangisini yuboradi (chat toza qoladi)."""
     uid = message.from_user.id
-    await safe_delete_message(message.chat.id, message.message_id)   # tugma matnini o'chir
+    await safe_delete_message(message.chat.id, message.message_id)
     old = last_menu.get(uid)
     if old:
-        await safe_delete_message(message.chat.id, old)             # eski menyuni o'chir
+        await safe_delete_message(message.chat.id, old)
     sent = await message.answer(text, reply_markup=kb)
     last_menu[uid] = sent.message_id
 
@@ -137,7 +128,7 @@ async def cmd_remove(message: Message):
     save_packs(new_packs)
     await message.answer(f"🗑 O'chirildi (ID {pack_id}). ✅")
 
-# ---------- Admin: sticker file_id olish (loading sticker uchun) ----------
+# ---------- Admin: sticker file_id olish ----------
 @dp.message(F.sticker)
 async def on_sticker(message: Message):
     if is_admin(message.from_user.id):
@@ -176,10 +167,10 @@ async def open_category(message: Message):
         packs_kb(packs),
     )
 
-# ---------- Pack tanlash → LOADING sticker → .zip ----------
+# ---------- Pack tanlash → LOADING → .zip ----------
 @dp.message(F.text.startswith("📦 "))
 async def send_pack(message: Message):
-    await safe_delete_message(message.chat.id, message.message_id)  # bosilgan tugma matnini o'chir
+    await safe_delete_message(message.chat.id, message.message_id)
     title = message.text[2:].strip()
     cat = user_category.get(message.from_user.id)
     packs = load_packs()
@@ -190,20 +181,14 @@ async def send_pack(message: Message):
     if pack is None:
         await message.answer("😕 Bu pack topilmadi.")
         return
-
-    # 1) Loading ko'rsat
     if LOADING_STICKER_ID:
         loading = await message.answer_sticker(LOADING_STICKER_ID)
     else:
         loading = await message.answer("⏳ <b>Yuklanmoqda...</b>")
-
-    # 2) Faylni yubor
     await message.answer_document(
         document=pack["file_id"],
         caption=f"📦 <b>{pack['title']}</b>\n\n✅ Marhamat! Zavqli o'yin tilaymiz! 🎮",
     )
-
-    # 3) Loading'ni o'chir
     await safe_delete_message(loading.chat.id, loading.message_id)
 
 # ---------- Admin: .zip yuboradi → bo'lim so'raydi ----------
