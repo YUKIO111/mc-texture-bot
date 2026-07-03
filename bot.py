@@ -23,7 +23,14 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_FILE = DATA_DIR / "packs.json"
 # Loading sticker file_id (ixtiyoriy). Bo'sh bo'lsa "⏳ Yuklanmoqda..." matni chiqadi.
-LOADING_STICKER_ID = os.getenv("LOADING_STICKER_ID", "")
+# ---------- Sticker file_id olish (vaqtincha: hammaga) ----------
+@dp.message(F.sticker)
+async def on_sticker(message: Message):
+    await message.answer(
+        "🆔 Sticker file_id:\n<code>"
+        + message.sticker.file_id
+        + "</code>"
+    )
 
 # ---------- Bo'limlar (emoji + nom) ----------
 CATEGORIES = [
