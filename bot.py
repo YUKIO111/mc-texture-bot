@@ -23,6 +23,10 @@ ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_FILE = DATA_DIR / "packs.json"
 LOADING_STICKER_ID = os.getenv("LOADING_STICKER_ID", "")
+# Majburiy a'zolik kanali (masalan: @mychannel). Bo'sh bo'lsa — tekshiruv o'chiq.
+REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
+# Ixtiyoriy: kanal havolasi (private kanal uchun to'liq invite link).
+CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 
 # ---------- Bo'limlar (emoji + nom) ----------
 CATEGORIES = [
@@ -70,6 +74,45 @@ async def show_menu(message: Message, text: str, kb):
     sent = await message.answer(text, reply_markup=kb)
     last_menu[uid] = sent.message_id
 
+# ---------- A'zolik tekshiruvi ----------
+def channel_link() -> str:
+    if CHANNEL_URL:
+        return CHANNEL_URL
+    if REQUIRED_CHANNEL.startswith("@"):
+        return f"https://t.me/{REQUIRED_CHANNEL[1:]}"
+    return ""
+
+async def is_subscribed(user_id: int) -> bool:
+    if not REQUIRED_CHANNEL:
+        return True  # kanal belgilanmagan → tekshirilmaydi
+    if is_admin(user_id):
+        return True  # adminni tekshirmaymiz
+    try:
+        member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
+        return member.status in ("member", "administrator", "creator")
+    except Exception:
+        return False
+
+def sub_kb() -> InlineKeyboardMarkup:
+    rows = []
+    link = channel_link()
+    if link:
+        rows.append([InlineKeyboardButton(text="📢 Kanalga a'zo bo'lish", url=link)])
+    rows.append([InlineKeyboardButton(text="✅ A'zo bo'ldim / Tekshirish", callback_data="check_sub")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def require_sub(message: Message) -> bool:
+    """A'zo bo'lsa True, bo'lmasa prompt yuborib False qaytaradi."""
+    if await is_subscribed(message.from_user.id):
+        return True
+    await message.answer(
+        "🔒 <b>Iltimos, avval kanalimizga a'zo bo'ling!</b>\n\n"
+        "📢 Pack'larni yuklab olish uchun kanalga qo'shiling,\n"
+        "so'ng <b>«✅ A'zo bo'ldim / Tekshirish»</b> tugmasini bosing 👇",
+        reply_markup=sub_kb(),
+    )
+    return False
+
 # ---------- Klaviaturalar ----------
 def main_kb() -> ReplyKeyboardMarkup:
     labels = [f"{e} {n}" for e, n in CATEGORIES]
@@ -92,12 +135,28 @@ def back_only_kb() -> ReplyKeyboardMarkup:
 # ---------- /start ----------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    if not await require_sub(message):
+        return
     user_category.pop(message.from_user.id, None)
     await show_menu(
         message,
         "✨ <b>Minecraft Texture Packs</b> ✨\n\n🎨 Bo'limni tanlang 👇",
         main_kb(),
     )
+
+# ---------- A'zolikni qayta tekshirish tugmasi ----------
+@dp.callback_query(F.data == "check_sub")
+async def cb_check_sub(callback: CallbackQuery):
+    if await is_subscribed(callback.from_user.id):
+        await safe_delete_message(callback.message.chat.id, callback.message.message_id)
+        sent = await callback.message.answer(
+            "✅ <b>Rahmat! A'zolik tasdiqlandi.</b>\n\n🎨 Bo'limni tanlang 👇",
+            reply_markup=main_kb(),
+        )
+        last_menu[callback.from_user.id] = sent.message_id
+        await callback.answer("Tasdiqlandi ✅")
+    else:
+        await callback.answer("❌ Hali a'zo bo'lmadingiz! Avval kanalga qo'shiling.", show_alert=True)
 
 # ---------- Admin: /list, /remove ----------
 @dp.message(Command("list"))
@@ -141,6 +200,8 @@ async def on_sticker(message: Message):
 # ---------- ⬅️ Orqaga ----------
 @dp.message(F.text == BACK_LABEL)
 async def go_back(message: Message):
+    if not await require_sub(message):
+        return
     user_category.pop(message.from_user.id, None)
     await show_menu(
         message,
@@ -151,6 +212,8 @@ async def go_back(message: Message):
 # ---------- Bo'lim tanlash ----------
 @dp.message(F.text.in_(set(CAT_LABELS.keys())))
 async def open_category(message: Message):
+    if not await require_sub(message):
+        return
     name = CAT_LABELS[message.text]
     user_category[message.from_user.id] = name
     packs = [p for p in load_packs() if p.get("category") == name]
@@ -170,6 +233,8 @@ async def open_category(message: Message):
 # ---------- Pack tanlash → LOADING (7s) → .zip ----------
 @dp.message(F.text.startswith("📦 "))
 async def send_pack(message: Message):
+    if not await require_sub(message):
+        return
     await safe_delete_message(message.chat.id, message.message_id)
     title = message.text[2:].strip()
     cat = user_category.get(message.from_user.id)
@@ -181,23 +246,15 @@ async def send_pack(message: Message):
     if pack is None:
         await message.answer("😕 Bu pack topilmadi.")
         return
-
-    # 1) Loading ko'rsat
     if LOADING_STICKER_ID:
         loading = await message.answer_sticker(LOADING_STICKER_ID)
     else:
         loading = await message.answer("⏳ <b>Yuklanmoqda...</b>")
-
-    # 2) 7 soniya kut
-    await asyncio.sleep(5)
-
-    # 3) Faylni yubor
+    await asyncio.sleep(4)
     await message.answer_document(
         document=pack["file_id"],
         caption=f"📦 <b>{pack['title']}</b>\n\n✅ Marhamat! Zavqli o'yin tilaymiz! 🎮",
     )
-
-    # 4) Loading'ni o'chir
     await safe_delete_message(loading.chat.id, loading.message_id)
 
 # ---------- Admin: .zip yuboradi → bo'lim so'raydi ----------
