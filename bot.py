@@ -167,7 +167,7 @@ async def open_category(message: Message):
         packs_kb(packs),
     )
 
-# ---------- Pack tanlash → LOADING → .zip ----------
+# ---------- Pack tanlash → LOADING (7s) → .zip ----------
 @dp.message(F.text.startswith("📦 "))
 async def send_pack(message: Message):
     await safe_delete_message(message.chat.id, message.message_id)
@@ -181,14 +181,23 @@ async def send_pack(message: Message):
     if pack is None:
         await message.answer("😕 Bu pack topilmadi.")
         return
+
+    # 1) Loading ko'rsat
     if LOADING_STICKER_ID:
         loading = await message.answer_sticker(LOADING_STICKER_ID)
     else:
         loading = await message.answer("⏳ <b>Yuklanmoqda...</b>")
+
+    # 2) 7 soniya kut
+    await asyncio.sleep(7)
+
+    # 3) Faylni yubor
     await message.answer_document(
         document=pack["file_id"],
         caption=f"📦 <b>{pack['title']}</b>\n\n✅ Marhamat! Zavqli o'yin tilaymiz! 🎮",
     )
+
+    # 4) Loading'ni o'chir
     await safe_delete_message(loading.chat.id, loading.message_id)
 
 # ---------- Admin: .zip yuboradi → bo'lim so'raydi ----------
