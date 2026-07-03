@@ -13,6 +13,8 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    ReplyKeyboardMarkup,
+    KeyboardButton,
 )
 
 # ---------- Config (Railway variables'dan) ----------
@@ -28,12 +30,16 @@ CATEGORIES = [
     ("🆕", "1.21+"),
     ("🧱", "1.16+"),
 ]
+BACK_LABEL = "⬅️ Orqaga"
+# Klaviaturadagi tugma matni -> bo'lim nomi
+CAT_LABELS = {f"{e} {n}": n for e, n in CATEGORIES}
 
 logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-pending = {}  # admin .zip yuborganda bo'lim tanlashini kutish uchun
+pending = {}        # admin .zip yuborganda bo'lim tanlashini kutish
+user_category = {}  # user_id -> hozir ochilgan bo'lim
 
 # ---------- Saqlash ----------
 def load_packs():
@@ -48,68 +54,109 @@ def save_packs(packs):
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-WELCOME = (
-    "✨ <b>Minecraft Texture Packs</b> ✨\n\n"
-    "🎨 Eng zo'r texture pack'lar shu yerda!\n"
-    "👇 Quyidagi bo'limlardan birini tanlang:"
-)
+async def safe_delete(message: Message):
+    # bosilgan tugma xabarini o'chirib, chatni toza tutadi
+    try:
+        await message.delete()
+    except Exception:
+        pass
 
-def categories_kb() -> InlineKeyboardMarkup:
-    rows = [
-        [InlineKeyboardButton(text=f"{emoji} {name}", callback_data=f"cat:{i}")]
-        for i, (emoji, name) in enumerate(CATEGORIES)
-    ]
-    return InlineKeyboardMarkup(inline_keyboard=rows)
+# ---------- Klaviaturalar ----------
+def main_kb() -> ReplyKeyboardMarkup:
+    labels = [f"{e} {n}" for e, n in CATEGORIES]
+    return ReplyKeyboardMarkup(
+        keyboard=[
+            [KeyboardButton(text=labels[0]), KeyboardButton(text=labels[1])],
+            [KeyboardButton(text=labels[2]), KeyboardButton(text=labels[3])],
+        ],
+        resize_keyboard=True,
+    )
 
-def back_button() -> InlineKeyboardButton:
-    return InlineKeyboardButton(text="⬅️ Orqaga", callback_data="home")
+def packs_kb(packs) -> ReplyKeyboardMarkup:
+    rows = [[KeyboardButton(text=f"📦 {p['title']}")] for p in packs]
+    rows.append([KeyboardButton(text=BACK_LABEL)])
+    return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
+
+def back_only_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(keyboard=[[KeyboardButton(text=BACK_LABEL)]], resize_keyboard=True)
 
 # ---------- /start ----------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer(WELCOME, reply_markup=categories_kb())
+    user_category.pop(message.from_user.id, None)
+    await message.answer(
+        "✨ <b>Minecraft Texture Packs</b> ✨\n\n🎨 Bo'limni tanlang 👇",
+        reply_markup=main_kb(),
+    )
 
-# ---------- Bo'lim ochish (eski xabar yangilanadi) ----------
-@dp.callback_query(F.data.startswith("cat:"))
-async def cb_category(callback: CallbackQuery):
-    idx = int(callback.data.split(":", 1)[1])
-    emoji, name = CATEGORIES[idx]
+# ---------- Admin: /list va /remove ----------
+@dp.message(Command("list"))
+async def cmd_list(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    packs = load_packs()
+    if not packs:
+        await message.answer("📭 Ro'yxat bo'sh.")
+        return
+    lines = [f"🔹 <b>{p['id']}</b>. {p['title']} — <i>{p.get('category', '?')}</i>" for p in packs]
+    await message.answer("📋 <b>Pack'lar:</b>\n" + "\n".join(lines) + "\n\n🗑 O'chirish: /remove ID")
+
+@dp.message(Command("remove"))
+async def cmd_remove(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split()
+    if len(parts) < 2:
+        await message.answer("✏️ Foydalanish: /remove ID")
+        return
+    pack_id = parts[1]
+    packs = load_packs()
+    new_packs = [p for p in packs if p["id"] != pack_id]
+    if len(new_packs) == len(packs):
+        await message.answer("❌ Bunday ID yo'q.")
+        return
+    save_packs(new_packs)
+    await message.answer(f"🗑 O'chirildi (ID {pack_id}). ✅")
+
+# ---------- ⬅️ Orqaga ----------
+@dp.message(F.text == BACK_LABEL)
+async def go_back(message: Message):
+    await safe_delete(message)
+    user_category.pop(message.from_user.id, None)
+    await message.answer("🏠 Asosiy menyu:", reply_markup=main_kb())
+
+# ---------- Bo'lim tanlash ----------
+@dp.message(F.text.in_(set(CAT_LABELS.keys())))
+async def open_category(message: Message):
+    await safe_delete(message)
+    name = CAT_LABELS[message.text]
+    user_category[message.from_user.id] = name
     packs = [p for p in load_packs() if p.get("category") == name]
     if not packs:
-        kb = InlineKeyboardMarkup(inline_keyboard=[[back_button()]])
-        await callback.message.edit_text(
-            f"{emoji} <b>{name}</b>\n\n😔 Bu bo'limda hozircha pack yo'q.\n⏳ Tez orada qo'shiladi!",
-            reply_markup=kb,
+        await message.answer(
+            f"😔 <b>{name}</b> bo'limida hozircha pack yo'q.\n⏳ Tez orada qo'shiladi!",
+            reply_markup=back_only_kb(),
         )
-        await callback.answer()
         return
-    rows = [
-        [InlineKeyboardButton(text=f"📦 {p['title']}", callback_data=f"get:{p['id']}")]
-        for p in packs
-    ]
-    rows.append([back_button()])
-    await callback.message.edit_text(
-        f"{emoji} <b>{name}</b>\n\n🗂 Mavjud pack'lar: <b>{len(packs)} ta</b>\n👇 Yuklab olish uchun bosing:",
-        reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
+    await message.answer(
+        f"📦 <b>{name}</b> — {len(packs)} ta pack\n👇 Yuklab olish uchun tanlang:",
+        reply_markup=packs_kb(packs),
     )
-    await callback.answer()
 
-# ---------- ⬅️ Orqaga → bosh menyu ----------
-@dp.callback_query(F.data == "home")
-async def cb_home(callback: CallbackQuery):
-    await callback.message.edit_text(WELCOME, reply_markup=categories_kb())
-    await callback.answer()
-
-# ---------- Pack yuklab olish ----------
-@dp.callback_query(F.data.startswith("get:"))
-async def cb_get(callback: CallbackQuery):
-    pack_id = callback.data.split(":", 1)[1]
-    pack = next((p for p in load_packs() if p["id"] == pack_id), None)
+# ---------- Pack tanlash → .zip ----------
+@dp.message(F.text.startswith("📦 "))
+async def send_pack(message: Message):
+    title = message.text[2:].strip()
+    cat = user_category.get(message.from_user.id)
+    packs = load_packs()
+    pack = next(
+        (p for p in packs if p["title"] == title and (cat is None or p.get("category") == cat)),
+        None,
+    ) or next((p for p in packs if p["title"] == title), None)
     if pack is None:
-        await callback.answer("Topilmadi 😕", show_alert=True)
+        await message.answer("😕 Bu pack topilmadi.")
         return
-    await callback.answer("⏳ Yuborilyapti...")
-    await callback.message.answer_document(
+    await message.answer_document(
         document=pack["file_id"],
         caption=f"📦 <b>{pack['title']}</b>\n\n✅ Marhamat! Zavqli o'yin tilaymiz! 🎮",
     )
@@ -164,35 +211,6 @@ async def cb_add(callback: CallbackQuery):
         f"✅ <b>Muvaffaqiyatli qo'shildi!</b>\n\n📦 {data['title']}\n{emoji} Bo'lim: <b>{name}</b>"
     )
     await callback.answer("Saqlandi ✅")
-
-# ---------- Admin: ro'yxat va o'chirish ----------
-@dp.message(Command("list"))
-async def cmd_list(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    packs = load_packs()
-    if not packs:
-        await message.answer("📭 Ro'yxat bo'sh.")
-        return
-    lines = [f"🔹 <b>{p['id']}</b>. {p['title']} — <i>{p.get('category', '?')}</i>" for p in packs]
-    await message.answer("📋 <b>Pack'lar:</b>\n" + "\n".join(lines) + "\n\n🗑 O'chirish: /remove ID")
-
-@dp.message(Command("remove"))
-async def cmd_remove(message: Message):
-    if not is_admin(message.from_user.id):
-        return
-    parts = message.text.split()
-    if len(parts) < 2:
-        await message.answer("✏️ Foydalanish: /remove ID")
-        return
-    pack_id = parts[1]
-    packs = load_packs()
-    new_packs = [p for p in packs if p["id"] != pack_id]
-    if len(new_packs) == len(packs):
-        await message.answer("❌ Bunday ID yo'q.")
-        return
-    save_packs(new_packs)
-    await message.answer(f"🗑 O'chirildi (ID {pack_id}). ✅")
 
 async def main():
     if not BOT_TOKEN:
