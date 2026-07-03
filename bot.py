@@ -189,7 +189,7 @@ async def send_pack(message: Message):
         loading = await message.answer("⏳ <b>Yuklanmoqda...</b>")
 
     # 2) 7 soniya kut
-    await asyncio.sleep(7)
+    await asyncio.sleep(5)
 
     # 3) Faylni yubor
     await message.answer_document(
