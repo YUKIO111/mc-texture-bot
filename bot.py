@@ -31,7 +31,6 @@ CATEGORIES = [
     ("🧱", "1.16+"),
 ]
 BACK_LABEL = "⬅️ Orqaga"
-# Klaviaturadagi tugma matni -> bo'lim nomi
 CAT_LABELS = {f"{e} {n}": n for e, n in CATEGORIES}
 
 logging.basicConfig(level=logging.INFO)
@@ -40,6 +39,7 @@ dp = Dispatcher()
 
 pending = {}        # admin .zip yuborganda bo'lim tanlashini kutish
 user_category = {}  # user_id -> hozir ochilgan bo'lim
+last_menu = {}      # user_id -> oxirgi menyu xabarining id'si
 
 # ---------- Saqlash ----------
 def load_packs():
@@ -54,12 +54,24 @@ def save_packs(packs):
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
 
-async def safe_delete(message: Message):
-    # bosilgan tugma xabarini o'chirib, chatni toza tutadi
+async def safe_delete_message(chat_id: int, message_id: int):
     try:
-        await message.delete()
+        await bot.delete_message(chat_id, message_id)
     except Exception:
         pass
+
+async def show_menu(message: Message, text: str, kb):
+    """Botning eski menyu xabarini o'chirib, yangisini yuboradi (chat toza qoladi)."""
+    uid = message.from_user.id
+    # 1) foydalanuvchi bosgan tugma xabarini o'chir
+    await safe_delete_message(message.chat.id, message.message_id)
+    # 2) botning oldingi menyu xabarini o'chir
+    old = last_menu.get(uid)
+    if old:
+        await safe_delete_message(message.chat.id, old)
+    # 3) yangi menyuni yubor va eslab qol
+    sent = await message.answer(text, reply_markup=kb)
+    last_menu[uid] = sent.message_id
 
 # ---------- Klaviaturalar ----------
 def main_kb() -> ReplyKeyboardMarkup:
@@ -84,9 +96,10 @@ def back_only_kb() -> ReplyKeyboardMarkup:
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
     user_category.pop(message.from_user.id, None)
-    await message.answer(
+    await show_menu(
+        message,
         "✨ <b>Minecraft Texture Packs</b> ✨\n\n🎨 Bo'limni tanlang 👇",
-        reply_markup=main_kb(),
+        main_kb(),
     )
 
 # ---------- Admin: /list va /remove ----------
@@ -121,31 +134,37 @@ async def cmd_remove(message: Message):
 # ---------- ⬅️ Orqaga ----------
 @dp.message(F.text == BACK_LABEL)
 async def go_back(message: Message):
-    await safe_delete(message)
     user_category.pop(message.from_user.id, None)
-    await message.answer("🏠 Asosiy menyu:", reply_markup=main_kb())
+    await show_menu(
+        message,
+        "✨ <b>Minecraft Texture Packs</b> ✨\n\n🎨 Bo'limni tanlang 👇",
+        main_kb(),
+    )
 
 # ---------- Bo'lim tanlash ----------
 @dp.message(F.text.in_(set(CAT_LABELS.keys())))
 async def open_category(message: Message):
-    await safe_delete(message)
     name = CAT_LABELS[message.text]
     user_category[message.from_user.id] = name
     packs = [p for p in load_packs() if p.get("category") == name]
     if not packs:
-        await message.answer(
+        await show_menu(
+            message,
             f"😔 <b>{name}</b> bo'limida hozircha pack yo'q.\n⏳ Tez orada qo'shiladi!",
-            reply_markup=back_only_kb(),
+            back_only_kb(),
         )
         return
-    await message.answer(
+    await show_menu(
+        message,
         f"📦 <b>{name}</b> — {len(packs)} ta pack\n👇 Yuklab olish uchun tanlang:",
-        reply_markup=packs_kb(packs),
+        packs_kb(packs),
     )
 
 # ---------- Pack tanlash → .zip ----------
 @dp.message(F.text.startswith("📦 "))
 async def send_pack(message: Message):
+    # bosilgan tugma matnini o'chirib qo'yamiz
+    await safe_delete_message(message.chat.id, message.message_id)
     title = message.text[2:].strip()
     cat = user_category.get(message.from_user.id)
     packs = load_packs()
