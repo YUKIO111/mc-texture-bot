@@ -22,10 +22,9 @@ BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_IDS = [int(x) for x in os.getenv("ADMIN_IDS", "").split(",") if x.strip()]
 DATA_DIR = Path(os.getenv("DATA_DIR", "data"))
 DATA_FILE = DATA_DIR / "packs.json"
+USERS_FILE = DATA_DIR / "users.json"
 LOADING_STICKER_ID = os.getenv("LOADING_STICKER_ID", "")
-# Majburiy a'zolik kanali (masalan: @mychannel). Bo'sh bo'lsa — tekshiruv o'chiq.
 REQUIRED_CHANNEL = os.getenv("REQUIRED_CHANNEL", "")
-# Ixtiyoriy: kanal havolasi (private kanal uchun to'liq invite link).
 CHANNEL_URL = os.getenv("CHANNEL_URL", "")
 
 # ---------- Bo'limlar (emoji + nom) ----------
@@ -42,7 +41,8 @@ logging.basicConfig(level=logging.INFO)
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher()
 
-pending = {}
+pending = {}            # admin .zip yuborganda bo'lim tanlashini kutish
+awaiting_preview = {}   # admin_id -> preview kutilayotgan pack id
 user_category = {}
 last_menu = {}
 
@@ -55,6 +55,21 @@ def load_packs():
 def save_packs(packs):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     DATA_FILE.write_text(json.dumps(packs, ensure_ascii=False, indent=2), encoding="utf-8")
+
+def load_users():
+    if USERS_FILE.exists():
+        return json.loads(USERS_FILE.read_text(encoding="utf-8"))
+    return []
+
+def save_users(users):
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
+    USERS_FILE.write_text(json.dumps(users), encoding="utf-8")
+
+def remember_user(user_id: int):
+    users = load_users()
+    if user_id not in users:
+        users.append(user_id)
+        save_users(users)
 
 def is_admin(user_id: int) -> bool:
     return user_id in ADMIN_IDS
@@ -79,14 +94,14 @@ def channel_link() -> str:
     if CHANNEL_URL:
         return CHANNEL_URL
     if REQUIRED_CHANNEL.startswith("@"):
-        return f"https://t.me/{REQUIRED_CHANNEL[1:]}"
+        return "https://t.me/" + REQUIRED_CHANNEL[1:]
     return ""
 
 async def is_subscribed(user_id: int) -> bool:
     if not REQUIRED_CHANNEL:
-        return True  # kanal belgilanmagan → tekshirilmaydi
+        return True
     if is_admin(user_id):
-        return True  # adminni tekshirmaymiz
+        return True
     try:
         member = await bot.get_chat_member(REQUIRED_CHANNEL, user_id)
         return member.status in ("member", "administrator", "creator")
@@ -102,7 +117,6 @@ def sub_kb() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 async def require_sub(message: Message) -> bool:
-    """A'zo bo'lsa True, bo'lmasa prompt yuborib False qaytaradi."""
     if await is_subscribed(message.from_user.id):
         return True
     await message.answer(
@@ -135,6 +149,7 @@ def back_only_kb() -> ReplyKeyboardMarkup:
 # ---------- /start ----------
 @dp.message(CommandStart())
 async def cmd_start(message: Message):
+    remember_user(message.from_user.id)
     if not await require_sub(message):
         return
     user_category.pop(message.from_user.id, None)
@@ -144,7 +159,7 @@ async def cmd_start(message: Message):
         main_kb(),
     )
 
-# ---------- A'zolikni qayta tekshirish tugmasi ----------
+# ---------- A'zolikni qayta tekshirish ----------
 @dp.callback_query(F.data == "check_sub")
 async def cb_check_sub(callback: CallbackQuery):
     if await is_subscribed(callback.from_user.id):
@@ -158,7 +173,49 @@ async def cb_check_sub(callback: CallbackQuery):
     else:
         await callback.answer("❌ Hali a'zo bo'lmadingiz! Avval kanalga qo'shiling.", show_alert=True)
 
-# ---------- Admin: /list, /remove ----------
+# ---------- 👑 Admin: /stats ----------
+@dp.message(Command("stats"))
+async def cmd_stats(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    users = load_users()
+    packs = load_packs()
+    total_dl = sum(p.get("downloads", 0) for p in packs)
+    text = (
+        "📊 <b>Bot statistikasi</b>\n\n"
+        f"👥 Foydalanuvchilar: <b>{len(users)}</b>\n"
+        f"📦 Pack'lar: <b>{len(packs)}</b>\n"
+        f"⬇️ Jami yuklab olishlar: <b>{total_dl}</b>\n"
+    )
+    top = sorted(packs, key=lambda p: p.get("downloads", 0), reverse=True)[:5]
+    if top:
+        text += "\n🏆 <b>Eng mashhur pack'lar:</b>\n"
+        for i, p in enumerate(top, 1):
+            text += f"{i}. {p['title']} — ⬇️ {p.get('downloads', 0)}\n"
+    await message.answer(text)
+
+# ---------- 👑 Admin: /broadcast ----------
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    parts = message.text.split(maxsplit=1)
+    if len(parts) < 2:
+        await message.answer("✏️ Foydalanish: <code>/broadcast Xabar matni</code>")
+        return
+    users = load_users()
+    await message.answer(f"📣 {len(users)} ta foydalanuvchiga yuborilmoqda...")
+    ok = fail = 0
+    for uid in users:
+        try:
+            await bot.send_message(uid, "📣 " + parts[1])
+            ok += 1
+        except Exception:
+            fail += 1
+        await asyncio.sleep(0.05)
+    await message.answer(f"✅ Yuborildi: <b>{ok}</b>\n❌ Yetmadi: <b>{fail}</b>")
+
+# ---------- 👑 Admin: /list, /remove, /skip ----------
 @dp.message(Command("list"))
 async def cmd_list(message: Message):
     if not is_admin(message.from_user.id):
@@ -167,7 +224,11 @@ async def cmd_list(message: Message):
     if not packs:
         await message.answer("📭 Ro'yxat bo'sh.")
         return
-    lines = [f"🔹 <b>{p['id']}</b>. {p['title']} — <i>{p.get('category', '?')}</i>" for p in packs]
+    lines = [
+        f"🔹 <b>{p['id']}</b>. {p['title']} — <i>{p.get('category', '?')}</i> — ⬇️ {p.get('downloads', 0)}"
+        + (" 🖼" if p.get("preview_id") else "")
+        for p in packs
+    ]
     await message.answer("📋 <b>Pack'lar:</b>\n" + "\n".join(lines) + "\n\n🗑 O'chirish: /remove ID")
 
 @dp.message(Command("remove"))
@@ -187,19 +248,41 @@ async def cmd_remove(message: Message):
     save_packs(new_packs)
     await message.answer(f"🗑 O'chirildi (ID {pack_id}). ✅")
 
-# ---------- Admin: sticker file_id olish ----------
+@dp.message(Command("skip"))
+async def cmd_skip(message: Message):
+    if awaiting_preview.pop(message.from_user.id, None):
+        await message.answer("⏭ Preview'siz saqlandi. ✅")
+
+# ---------- 👑 Admin: sticker file_id ----------
 @dp.message(F.sticker)
 async def on_sticker(message: Message):
     if is_admin(message.from_user.id):
         await message.answer(
-            "🆔 Sticker file_id:\n<code>"
-            + message.sticker.file_id
-            + "</code>\n\nBuni Railway'da <b>LOADING_STICKER_ID</b> variable'ga qo'ying."
+            "🆔 Sticker file_id:\n<code>" + message.sticker.file_id + "</code>"
         )
+
+# ---------- 👑 Admin: preview rasm qabul qilish ----------
+@dp.message(F.photo)
+async def on_photo(message: Message):
+    if not is_admin(message.from_user.id):
+        return
+    pack_id = awaiting_preview.get(message.from_user.id)
+    if not pack_id:
+        return
+    packs = load_packs()
+    pack = next((p for p in packs if p["id"] == pack_id), None)
+    if pack is None:
+        awaiting_preview.pop(message.from_user.id, None)
+        return
+    pack["preview_id"] = message.photo[-1].file_id
+    save_packs(packs)
+    awaiting_preview.pop(message.from_user.id, None)
+    await message.answer(f"🖼 <b>Preview saqlandi!</b>\n📦 {pack['title']} ✅")
 
 # ---------- ⬅️ Orqaga ----------
 @dp.message(F.text == BACK_LABEL)
 async def go_back(message: Message):
+    remember_user(message.from_user.id)
     if not await require_sub(message):
         return
     user_category.pop(message.from_user.id, None)
@@ -212,6 +295,7 @@ async def go_back(message: Message):
 # ---------- Bo'lim tanlash ----------
 @dp.message(F.text.in_(set(CAT_LABELS.keys())))
 async def open_category(message: Message):
+    remember_user(message.from_user.id)
     if not await require_sub(message):
         return
     name = CAT_LABELS[message.text]
@@ -230,9 +314,10 @@ async def open_category(message: Message):
         packs_kb(packs),
     )
 
-# ---------- Pack tanlash → LOADING (7s) → .zip ----------
+# ---------- Pack tanlash → 🖼 preview → ⏳ loading (7s) → .zip ----------
 @dp.message(F.text.startswith("📦 "))
 async def send_pack(message: Message):
+    remember_user(message.from_user.id)
     if not await require_sub(message):
         return
     await safe_delete_message(message.chat.id, message.message_id)
@@ -246,18 +331,37 @@ async def send_pack(message: Message):
     if pack is None:
         await message.answer("😕 Bu pack topilmadi.")
         return
+
+    # ⬇️ hisoblagichni oshir
+    pack["downloads"] = pack.get("downloads", 0) + 1
+    save_packs(packs)
+
+    # 🖼 preview bo'lsa ko'rsat
+    if pack.get("preview_id"):
+        await message.answer_photo(
+            photo=pack["preview_id"],
+            caption=f"🖼 <b>{pack['title']}</b> — ko'rinishi",
+        )
+
+    # ⏳ loading
     if LOADING_STICKER_ID:
         loading = await message.answer_sticker(LOADING_STICKER_ID)
     else:
         loading = await message.answer("⏳ <b>Yuklanmoqda...</b>")
-    await asyncio.sleep(4)
+    await asyncio.sleep(7)
+
+    # 📦 fayl
     await message.answer_document(
         document=pack["file_id"],
-        caption=f"📦 <b>{pack['title']}</b>\n\n✅ Marhamat! Zavqli o'yin tilaymiz! 🎮",
+        caption=(
+            f"📦 <b>{pack['title']}</b>\n"
+            f"⬇️ {pack['downloads']} marta yuklab olingan\n\n"
+            "✅ Marhamat! Zavqli o'yin tilaymiz! 🎮"
+        ),
     )
     await safe_delete_message(loading.chat.id, loading.message_id)
 
-# ---------- Admin: .zip yuboradi → bo'lim so'raydi ----------
+# ---------- 👑 Admin: .zip yuboradi → bo'lim so'raydi ----------
 @dp.message(F.document)
 async def on_document(message: Message):
     if not is_admin(message.from_user.id):
@@ -281,7 +385,7 @@ async def on_document(message: Message):
         reply_markup=InlineKeyboardMarkup(inline_keyboard=rows),
     )
 
-# ---------- Admin: bo'lim tanlanganda saqlanadi ----------
+# ---------- 👑 Admin: bo'lim tanlanganda saqlanadi ----------
 @dp.callback_query(F.data.startswith("add:"))
 async def cb_add(callback: CallbackQuery):
     if not is_admin(callback.from_user.id):
@@ -300,11 +404,16 @@ async def cb_add(callback: CallbackQuery):
         "file_id": data["file_id"],
         "file_name": data["file_name"],
         "category": name,
+        "downloads": 0,
     })
     save_packs(packs)
     pending.pop(callback.from_user.id, None)
+    awaiting_preview[callback.from_user.id] = new_id
     await callback.message.edit_text(
-        f"✅ <b>Muvaffaqiyatli qo'shildi!</b>\n\n📦 {data['title']}\n{emoji} Bo'lim: <b>{name}</b>"
+        f"✅ <b>Muvaffaqiyatli qo'shildi!</b>\n\n"
+        f"📦 {data['title']}\n{emoji} Bo'lim: <b>{name}</b>\n\n"
+        "🖼 Endi <b>preview rasm</b> (skrinshot) yuboring — foydalanuvchilar pack'ni ko'rib turadi.\n"
+        "⏭ Kerak bo'lmasa: /skip"
     )
     await callback.answer("Saqlandi ✅")
 
